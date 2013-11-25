@@ -1,0 +1,281 @@
+#!/usr/bin/env python
+##############################
+# md2ad
+#
+# Convert Markdown to AsciiDoc
+#
+# Copyright 2012-2013 the original author or authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# @author Greg Turnquist
+##############################
+
+import os
+import re
+import sys
+
+if len(sys.argv) < 2:
+    print "Usage: %s <file>" % sys.argv[0]
+    sys.exit(1)
+
+with open(sys.argv[1] + ".ftl.md") as input:
+    with open(sys.argv[1] + ".adoc", "w") as output:
+        link_table = {}
+
+        results = ""
+
+        data = input.readlines()
+
+        prereq_macro = False
+
+        # Sweep 1: Scan for '[text]: URL' patterns (found at bottom) and build a map of links
+        for line in data: 
+            match = re.match(r"\[(.*)\]: (http://.*)", line)
+            if (match):
+                name, url = match.groups()
+                if "0.5.0" in url:
+                    url = re.sub("0.5.0.M.", "{spring_boot_version}", url)
+                link_table[name] = url
+
+        # Sweep 2: Go line-by-line, and look for simple patterns that a mutually exclusive
+        for line in data:
+            if "@snippet" in line and "path" in line:
+                path, prefix = re.search('<@snippet path="(.*)" prefix="(.*)".*/>', line).groups()
+                suffix = path.split(".")[1]
+                results += "`%s`\n" % path
+                results += "[source,%s]\n" % suffix
+                results += "----\n"
+                results += "include::%s/%s[]\n" % (prefix, path)
+                results += "----\n"
+            elif "@snippet" in line: # subset
+                path, tag, prefix = re.search('<@snippet "(.*)" "(.*)" "(.*)"/>', line).groups()
+                suffix = path.split(".")[1]
+                results += "`%s`\n" % path
+                results += "[source,%s]\n" % suffix
+                results += "----\n"
+                results += "include::%s/%s[tag=%s]\n" % (prefix, path, tag)
+                results += "----\n."
+                print "Be sure to update %s/%s to it uses tag::%s[] and end::%s[]" % (prefix, path, tag, tag)
+            elif "```" in line:
+                if len(line[:-1]) > len("```"):
+                    suffix = line.split("```")[1][:-1]
+                    results += "[source,%s]\n" % suffix
+                    results += "----\n"
+                else:
+                    results += "---- +TODO: If this is an output, replace with .'s+\n"
+            elif "<@" in line:
+                before, raw_macro = re.match(r'(.*)<@(.*)/>', line).groups()
+                #macro = "".join(raw_macro.split("_"))
+                macro = raw_macro
+                if " " in macro:
+                    macro_parts = macro.split(" ")
+                    macro = macro_parts[0]
+                    parm = " ".join(macro_parts[1:]) # In case there is a space in the argument
+                    parts = parm.split("=")
+                    results += ":%s: %s\n" % (parts[0], parts[1][1:-1])
+                before = re.sub("##", "===", before)
+                if macro in ["prereq_editor_jdk_buildtools", "prereq_editor_android_buildtools"]: # this macro needs a fresh inserted to break up the list
+                    prereq_macro = True
+                if macro not in ["u_oauth", "u_nosql", "u_rest", "u_json", "u_view_templates", "u_war", "u_tomcat", "u_application_context"]:
+                    results += "include::https://raw.github.com/spring-guides/getting-started-macros/master/%s.adoc[]\n" % macro
+                if macro == "create_both_builds":
+                    results += """
+`build.gradle`
+// AsciiDoc source formatting doesn't support groovy, so using java instead
+[source,java]
+----
+include::initial/build.gradle[]
+----
+"""
+            elif '<a name="scratch"></a>' in line:
+                results += "[[scratch]]\n"
+            elif '<a name="initial"></a>' in line:
+                results += "[[initial]]\n"
+            elif '<a name' in line:
+                results += re.sub('<a name="(?P<name>.+)"></a>', "[[\g<name>]]", line)
+            elif '<#assign' in line:
+                results += re.sub('<#assign (?P<name>.*)="(?P<value>.*)">', ':\g<name>: \g<value>', line)
+            elif "#####" in line:
+                results += re.sub("#####", "======", line)
+            elif "####" in line:
+                results += re.sub("####", "=====", line)
+            elif "###" in line:
+                results + re.sub("###", "====", line)
+            elif "##" in line:
+                results += re.sub("##", "===", line)
+            elif "![" in line:
+                results += re.sub(r"!\[(?P<text>.*)\]\((?P<link>.*)\)", "image::\g<link>[\g<text>]", line) 
+            else:
+                results += line
+
+        # Sweep 3: Iterate through the set of links and do a global-search-and-replace
+        #for link_key in link_table.keys():
+        #    #if link_key[0] == '`':
+        #    #    results = re.sub("\[%s]\[]" % link_key, "link:%s[%s]" % (link_table[link_key], link_key[1:-1]), results)
+        #    #else:
+        #    # Based on feedback from Chris, decided to not strip out the backtics, and instead hold onto the option to apply custom css
+        #    results = re.sub("\[%s]\[]" % link_key, "{%s}[%s] +TODO Check out this link+" % (link_key, link_key), results)
+        #    # The following rule fixes one form of linking but breaks another. Better to leave out and fix manually
+        #    #results = re.sub("\[(?P<name>.*)]\[%s]" % link_key, "link:%s[\g<name>]" % link_table[link_key], results)
+        # Startover with sweep 3. Several things have changed, so need to revisit this entirely.
+
+        # Sweep 4: Split up into lines, and do a line-by-line replacement of '-----' with '==='
+        results = results.split("\n")
+        new_results = []
+        for i in range(len(results)):
+            if "-------" in results[i]:
+                new_results[-1] = "== " + new_results[-1]
+            else:
+                new_results.append(results[i])
+        results = "\n".join(new_results)
+
+        # Sweep 5: Replace '> **Note:**' with 'NOTE: '
+        results = re.sub("> \*\*Note:\*\* ", "NOTE: ", results)
+        results = re.sub("> Note: ", "NOTE: ", results)
+
+        # Sweep 6: Replace '<http://foobar:port/foo>' by stripping angled brackets
+        results = re.sub("<(?P<url>http://.*)>", "\g<url>", results)
+
+        # Sweep 7: Remove links from bottom of document
+        results = results.split("\n")
+        new_results = []
+        for i in range(len(results)):
+            if re.match("\[.*]: http.*//.*", results[i]):
+                pass
+            else:
+                new_results.append(results[i])
+        results = "\n".join(new_results)
+
+        # Sweep 8: Set top level heading
+        results = re.sub("=== What you'll build", "== What you'll build", results)
+
+        # Sweep 9: Look for understanding docs, then back up to last [, and slip in the link.
+        results = results.split("\n")
+        new_results = []
+        for i in range(len(results)):
+            def slide_token_left(key, replace):
+                if key in results[i]:
+                    pos = results[i].find(key)
+                    backup = results[i][:pos].rfind("[")
+                    slid_over = results[i][:backup] + replace + results[i][backup:]
+                    pos = slid_over.find(key)
+                    slid_over = slid_over[:pos] + slid_over[pos+len(key):]
+                    new_results.append(slid_over)
+                    return True
+                else:
+                    return False
+
+            if not slide_token_left("[u-json]", "link:/understanding/JSON") and \
+               not slide_token_left("[u-application-context]", "link:/understanding/application-context") and \
+               not slide_token_left("[u-oauth]", "link:/understanding/OAuth") and \
+               not slide_token_left("[u-git]", "link:/understanding/Git") and \
+               not slide_token_left("[u-hateoas]", "link:/understanding/HATEOAS") and \
+               not slide_token_left("[u-amqp]", "link:/understanding/AMQP") and \
+               not slide_token_left("[u-nosql]", "link:/understanding/NoSQL") and \
+               not slide_token_left("[u-tomcat]", "link:/understanding/Tomcat") and \
+               not slide_token_left("[u-war]", "link:/understanding/WAR") and \
+               not slide_token_left("[u-view-templates]", "link:/understanding/view-templates") and \
+               not slide_token_left("[u-rest]", "link:/understanding/REST"):
+                new_results.append(results[i])
+        results = "\n".join(new_results)
+
+        # Sweep 10: Remove <#noparse> and </#noparse> tags
+        results = re.sub("<#noparse>", "", results)
+        results = re.sub("</#noparse>", "", results)
+
+        # Sweep 11: Reduce link:http: to http:
+        results = re.sub("link:http:", "http:", results)
+
+        # Sweep 12: Replace ${project_id} with {project_id}
+        results = re.sub("\$\{project_id}", "{project_id}", results)
+
+        # Sweep 13: Replace [text](link) with link[text]
+        results = re.sub("\[(?P<text>[\w@` ]+)]\((?P<url>https?://[\w\./-]+)\)", "\g<url>[\g<text>]", results)
+
+        # Sweep 14: Drop "15 minutes"
+        if prereq_macro:
+            results = results.split("\n")
+            new_results = []
+            for i in range(len(results)):
+                if "15 minutes" in results[i]:
+                    pass
+                else:
+                    new_results.append(results[i])
+        results = "\n".join(new_results)
+
+        if ":spring_boot_version:" not in results:
+            output.write(":spring_boot_version: 0.5.0.M6\n")
+
+        for link_key in link_table.keys():
+            stripped_down = re.sub("@", "", link_key)
+            stripped_down = re.sub("`", "", stripped_down)
+            if "@" in link_key or "`" in link_key:
+                if stripped_down in ["{Component}", "{EnableAutoConfiguration}", "{SpringApplication}", "{DispatcherServlet}"]:
+                    output.write("//TODO: Go a global search and replace to fix {%s} and then replace with {%s} (after fixing the link itself)\n" % (link_key, stripped_down))
+            output.write(":%s: %s\n" % (stripped_down, link_table[link_key]))
+            results = re.sub("\[%s]" % link_key, "{%s}" % link_key, results)
+
+        # Sweep 15: Swap [foo bar]{what ever}
+        while True:
+            next_pos = results.find("]{")
+            if next_pos == -1: break
+            left_pos = results[:next_pos].rfind("[")
+            right_pos = results[next_pos:].find("}") + next_pos
+            results = results[:left_pos] + results[next_pos+1:right_pos+1] + results[left_pos:next_pos+1] + results[right_pos+1:]
+
+        # Sweep 16: Fix cross links
+        while True:
+            next_pos = results.find("(#")
+            if next_pos== -1: break
+            left_pos = results[:next_pos].rfind("[")
+            right_pos = results[next_pos:].find(")") + next_pos
+            results = results[:left_pos] + "<<" + results[next_pos+2:right_pos] + ">>" + results[right_pos+1:]
+
+        # Sweep 17: Delete [source,sh] and <#noparse>/</#noparse>
+        results = results.split("\n")
+        new_results = []
+        for i in range(len(results)):
+            if "[source,sh]" in results[i] or "[source,]" in results[i]:
+                pass
+            elif "<#noparse>" in results[i] or "</#noparse>" in results[i]:
+                pass
+            else:
+                new_results.append(results[i])
+        results = "\n".join(new_results)
+
+        # Sweep 18: Replace some common patterns
+        results = re.sub("{`SpringApplication`}\[]", "{SpringApplication}[`SpringApplication`]", results)
+        results = re.sub("{`@EnableAutoConfiguration`}\[]", "{EnableAutoConfiguration}[`@EnableAutoConfiguration`]", results)
+        results = re.sub("{`@Component`}\[]", "{Component}[`@Component`]", results)
+        results = re.sub("{`DispatcherServlet`}\[]", "{DispatcherServlet}[`DispatcherServlet`]", results)
+
+        output.write(":toc:\n")
+        output.write(":icons: font\n")
+        output.write(":source-highlighter: prettify\n")
+
+        # TODO Header
+        #output.write("//////////////////////////////////////////////////////////////\n")
+        #output.write("// This file was pre-converted, but there are TODOs you must deal with\n")
+        #output.write("// It was impossible to trap things like [Jackson JSON][jackson] and convert them\n")
+        #output.write("// properly. So to help, the matrix of links is included here for you to fix manually.\n")
+        #output.write("// It was also impossible to replace all the [foobar][u-rest] understand guide links without\n")
+        #output.write("// breaking other parts.\n")
+        #output.write("// I'd embed the TODOs closer, but if I could, well, I'd patch them, ehh?\n")
+        #output.write("// Look for instances of what's on the left, and substitute with what's on the right.\n")
+        #output.write("//////////////////////////////////////////////////////////////\n\n")
+
+        # Print out the final results to foo.asc
+        for line in results:
+            output.write(line)
+
